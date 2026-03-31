@@ -236,17 +236,49 @@ elif page == "Data Explorer":
     volume = None
 
     if data_mode == "Upload .tif Volume":
-        uploaded_file = st.file_uploader("Upload a .tif CT volume", type=["tif", "tiff"])
+        import tifffile
+        import io
+        up_col1, up_col2 = st.columns(2)
+        with up_col1:
+            uploaded_file = st.file_uploader("Upload a .tif CT volume", type=["tif", "tiff"])
+        with up_col2:
+            uploaded_label = st.file_uploader("Upload a .tif label mask (optional)", type=["tif", "tiff"], key="label_uploader")
+
         if uploaded_file is not None:
-            import tifffile
-            import io
-            volume = tifffile.imread(io.BytesIO(uploaded_file.read())).astype(np.float32)
+            raw_bytes = uploaded_file.read()
+            try:
+                volume = tifffile.imread(io.BytesIO(raw_bytes)).astype(np.float32)
+            except Exception:
+                from PIL import Image
+                img = Image.open(io.BytesIO(raw_bytes))
+                frames = []
+                for i in range(getattr(img, "n_frames", 1)):
+                    img.seek(i)
+                    frames.append(np.array(img).astype(np.float32))
+                volume = np.stack(frames, axis=0)
             st.session_state.uploaded_volume = volume
             st.success(f"Loaded volume: shape={volume.shape}, dtype={volume.dtype}")
         elif "uploaded_volume" in st.session_state:
             volume = st.session_state.uploaded_volume
         else:
             st.info("Upload a .tif file or switch to synthetic demo data.")
+
+        if uploaded_label is not None:
+            lbl_bytes = uploaded_label.read()
+            try:
+                label = tifffile.imread(io.BytesIO(lbl_bytes)).astype(np.float32)
+            except Exception:
+                from PIL import Image
+                img = Image.open(io.BytesIO(lbl_bytes))
+                frames = []
+                for i in range(getattr(img, "n_frames", 1)):
+                    img.seek(i)
+                    frames.append(np.array(img).astype(np.float32))
+                label = np.stack(frames, axis=0)
+            st.session_state.uploaded_label = label
+            st.success(f"Loaded label: shape={label.shape}, dtype={label.dtype}")
+        elif "uploaded_label" not in st.session_state:
+            st.session_state.uploaded_label = None
     else:
         ensure_data()
         volume = st.session_state.data["volume"]
@@ -526,6 +558,44 @@ elif page == "Inference & Results":
 
     ensure_data()
 
+    # Data source for inference
+    infer_data_mode = st.radio(
+        "Data Source",
+        ["Synthetic Demo Data", "Upload Volume + Label"],
+        horizontal=True,
+        key="infer_data_mode",
+    )
+
+    if infer_data_mode == "Upload Volume + Label":
+        import tifffile
+        import io as _io
+        infer_col1, infer_col2 = st.columns(2)
+        with infer_col1:
+            infer_vol_file = st.file_uploader("Upload CT volume (.tif)", type=["tif", "tiff"], key="infer_vol")
+        with infer_col2:
+            infer_lbl_file = st.file_uploader("Upload label mask (.tif)", type=["tif", "tiff"], key="infer_lbl")
+
+        if infer_vol_file is not None:
+            volume = tifffile.imread(_io.BytesIO(infer_vol_file.read())).astype(np.float32)
+            st.session_state.uploaded_volume = volume
+        elif "uploaded_volume" in st.session_state:
+            volume = st.session_state.uploaded_volume
+        else:
+            volume = st.session_state.data["volume"]
+            st.warning("No volume uploaded — using synthetic data.")
+
+        if infer_lbl_file is not None:
+            gt_mask = tifffile.imread(_io.BytesIO(infer_lbl_file.read())).astype(np.float32)
+            st.session_state.uploaded_label = gt_mask
+        elif "uploaded_label" in st.session_state and st.session_state.uploaded_label is not None:
+            gt_mask = st.session_state.uploaded_label
+        else:
+            gt_mask = st.session_state.data["gt_mask"]
+            st.warning("No label uploaded — using synthetic ground truth.")
+    else:
+        volume = st.session_state.data["volume"]
+        gt_mask = st.session_state.data["gt_mask"]
+
     # Check for model upload
     run_real_inference = False
     st.markdown("#### Model Weights")
@@ -534,9 +604,6 @@ elif page == "Inference & Results":
     if model_file is not None:
         st.info("Model weights uploaded. Running real inference (this may take a while on CPU)...")
         run_real_inference = True
-
-    volume = st.session_state.data["volume"]
-    gt_mask = st.session_state.data["gt_mask"]
 
     if run_real_inference:
         from model import SimpleUNet3D

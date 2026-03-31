@@ -4,6 +4,7 @@ numpy
 matplotlib
 plotly
 tifffile
+imagecodecs
 Pillow
 scipy
 scikit-image
