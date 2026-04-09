@@ -4,6 +4,46 @@ import torch
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
+# ─── MongoDB Connection ───────────────────────────────────────────────
+from pymongo import MongoClient
+from datetime import datetime, timezone
+import uuid
+
+MONGO_URI = "mongodb+srv://sahasrakotagiri16_db_user:7032607087@cluster0.juudgbo.mongodb.net/?appName=Cluster0"
+
+@st.cache_resource
+def get_db():
+    client = MongoClient(MONGO_URI)
+    db = client["vesuvius_db"]
+    # Advanced: Compound index on session collection
+    db["sessions"].create_index([("timestamp", -1), ("data_source", 1)])
+    # Advanced: TTL index — auto delete sessions older than 30 days
+    db["sessions"].create_index("timestamp", expireAfterSeconds=2592000)
+    return db
+
+db = get_db()
+
+def log_session(data_source, metrics, pred_stats):
+    session = {
+        "session_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc),
+        "data_source": data_source,
+        "metrics": metrics,
+        "pred_stats": pred_stats
+    }
+    db["sessions"].insert_one(session)
+
+def get_aggregated_stats():
+    pipeline = [
+        {"$group": {
+            "_id": "$data_source",
+            "avg_dice": {"$avg": "$metrics.Dice Score"},
+            "avg_iou": {"$avg": "$metrics.IoU (Jaccard)"},
+            "total_sessions": {"$sum": 1}
+        }}
+    ]
+    return list(db["sessions"].aggregate(pipeline))
+
 st.set_page_config(
     page_title="Vesuvius Surface Detection",
     page_icon="🏛️",
@@ -128,7 +168,6 @@ if page == "Overview":
 
     st.markdown("---")
 
-    # Challenge overview
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown("### The Vesuvius Challenge")
@@ -158,7 +197,6 @@ if page == "Overview":
 
     st.markdown("---")
 
-    # Pipeline visualization
     st.markdown("### Processing Pipeline")
     cols = st.columns([2, 1, 2, 1, 2, 1, 2])
 
@@ -187,7 +225,6 @@ if page == "Overview":
 
     st.markdown("---")
 
-    # Architecture summary
     with st.expander("Architecture Details", expanded=False):
         st.markdown("""
         **SimpleUNet3D** — A 3D encoder-decoder with skip connections:
@@ -214,8 +251,6 @@ if page == "Overview":
         3. Run each patch through the model
         4. Average predictions in overlapping regions
         5. Threshold at **0.35** to produce binary mask
-
-        The overlap averaging reduces patch boundary artifacts and produces smoother predictions.
         """)
 
 
@@ -226,7 +261,6 @@ elif page == "Data Explorer":
 
     st.markdown("---")
 
-    # Data source selection
     data_mode = st.radio(
         "Data Source",
         ["Synthetic Demo Data", "Upload .tif Volume"],
@@ -236,49 +270,17 @@ elif page == "Data Explorer":
     volume = None
 
     if data_mode == "Upload .tif Volume":
-        import tifffile
-        import io
-        up_col1, up_col2 = st.columns(2)
-        with up_col1:
-            uploaded_file = st.file_uploader("Upload a .tif CT volume", type=["tif", "tiff"])
-        with up_col2:
-            uploaded_label = st.file_uploader("Upload a .tif label mask (optional)", type=["tif", "tiff"], key="label_uploader")
-
+        uploaded_file = st.file_uploader("Upload a .tif CT volume", type=["tif", "tiff"])
         if uploaded_file is not None:
-            raw_bytes = uploaded_file.read()
-            try:
-                volume = tifffile.imread(io.BytesIO(raw_bytes)).astype(np.float32)
-            except Exception:
-                from PIL import Image
-                img = Image.open(io.BytesIO(raw_bytes))
-                frames = []
-                for i in range(getattr(img, "n_frames", 1)):
-                    img.seek(i)
-                    frames.append(np.array(img).astype(np.float32))
-                volume = np.stack(frames, axis=0)
+            import tifffile
+            import io
+            volume = tifffile.imread(io.BytesIO(uploaded_file.read())).astype(np.float32)
             st.session_state.uploaded_volume = volume
             st.success(f"Loaded volume: shape={volume.shape}, dtype={volume.dtype}")
         elif "uploaded_volume" in st.session_state:
             volume = st.session_state.uploaded_volume
         else:
             st.info("Upload a .tif file or switch to synthetic demo data.")
-
-        if uploaded_label is not None:
-            lbl_bytes = uploaded_label.read()
-            try:
-                label = tifffile.imread(io.BytesIO(lbl_bytes)).astype(np.float32)
-            except Exception:
-                from PIL import Image
-                img = Image.open(io.BytesIO(lbl_bytes))
-                frames = []
-                for i in range(getattr(img, "n_frames", 1)):
-                    img.seek(i)
-                    frames.append(np.array(img).astype(np.float32))
-                label = np.stack(frames, axis=0)
-            st.session_state.uploaded_label = label
-            st.success(f"Loaded label: shape={label.shape}, dtype={label.dtype}")
-        elif "uploaded_label" not in st.session_state:
-            st.session_state.uploaded_label = None
     else:
         ensure_data()
         volume = st.session_state.data["volume"]
@@ -286,7 +288,6 @@ elif page == "Data Explorer":
     if volume is not None:
         from utils import get_volume_stats
 
-        # Volume metadata
         stats = get_volume_stats(volume)
         st.markdown("### Volume Metadata")
         meta_cols = st.columns(4)
@@ -309,7 +310,6 @@ elif page == "Data Explorer":
 
         D, H, W = volume.shape
 
-        # Normalize volume for display
         v_disp = volume.astype(np.float32)
         v_disp = (v_disp - v_disp.min()) / (v_disp.max() - v_disp.min() + 1e-8)
 
@@ -351,7 +351,6 @@ elif page == "Data Explorer":
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
 
-        # Intensity histogram
         with st.expander("Intensity Distribution"):
             fig, ax = plt.subplots(figsize=(10, 3))
             fig.patch.set_facecolor("#0E1117")
@@ -375,7 +374,6 @@ elif page == "Model Architecture":
 
     from model import SimpleUNet3D, count_parameters, get_architecture_summary
 
-    # Parameter count
     model = SimpleUNet3D()
     n_params = count_parameters(model)
 
@@ -400,11 +398,8 @@ elif page == "Model Architecture":
         )
 
     st.markdown("---")
-
-    # Visual architecture diagram
     st.markdown("### Architecture Diagram")
 
-    # Build a visual text-based diagram
     diagram = """
     ```
     Input (1ch)
@@ -474,8 +469,6 @@ elif page == "Model Architecture":
     st.markdown(diagram)
 
     st.markdown("---")
-
-    # Detailed layer table
     st.markdown("### Layer Details")
 
     arch = get_architecture_summary()
@@ -492,8 +485,6 @@ elif page == "Model Architecture":
         st.table(table_data)
 
     st.markdown("---")
-
-    # Training configuration
     st.markdown("### Training Configuration")
     train_cols = st.columns(4)
     configs = [
@@ -510,7 +501,6 @@ elif page == "Model Architecture":
                 unsafe_allow_html=True,
             )
 
-    # Source code
     with st.expander("View Model Source Code"):
         st.code("""
 class SimpleUNet3D(nn.Module):
@@ -558,45 +548,6 @@ elif page == "Inference & Results":
 
     ensure_data()
 
-    # Data source for inference
-    infer_data_mode = st.radio(
-        "Data Source",
-        ["Synthetic Demo Data", "Upload Volume + Label"],
-        horizontal=True,
-        key="infer_data_mode",
-    )
-
-    if infer_data_mode == "Upload Volume + Label":
-        import tifffile
-        import io as _io
-        infer_col1, infer_col2 = st.columns(2)
-        with infer_col1:
-            infer_vol_file = st.file_uploader("Upload CT volume (.tif)", type=["tif", "tiff"], key="infer_vol")
-        with infer_col2:
-            infer_lbl_file = st.file_uploader("Upload label mask (.tif)", type=["tif", "tiff"], key="infer_lbl")
-
-        if infer_vol_file is not None:
-            volume = tifffile.imread(_io.BytesIO(infer_vol_file.read())).astype(np.float32)
-            st.session_state.uploaded_volume = volume
-        elif "uploaded_volume" in st.session_state:
-            volume = st.session_state.uploaded_volume
-        else:
-            volume = st.session_state.data["volume"]
-            st.warning("No volume uploaded — using synthetic data.")
-
-        if infer_lbl_file is not None:
-            gt_mask = tifffile.imread(_io.BytesIO(infer_lbl_file.read())).astype(np.float32)
-            st.session_state.uploaded_label = gt_mask
-        elif "uploaded_label" in st.session_state and st.session_state.uploaded_label is not None:
-            gt_mask = st.session_state.uploaded_label
-        else:
-            gt_mask = st.session_state.data["gt_mask"]
-            st.warning("No label uploaded — using synthetic ground truth.")
-    else:
-        volume = st.session_state.data["volume"]
-        gt_mask = st.session_state.data["gt_mask"]
-
-    # Check for model upload
     run_real_inference = False
     st.markdown("#### Model Weights")
     model_file = st.file_uploader("Upload model weights (.pth) for real inference, or skip for demo predictions", type=["pth", "pt"])
@@ -604,6 +555,9 @@ elif page == "Inference & Results":
     if model_file is not None:
         st.info("Model weights uploaded. Running real inference (this may take a while on CPU)...")
         run_real_inference = True
+
+    volume = st.session_state.data["volume"]
+    gt_mask = st.session_state.data["gt_mask"]
 
     if run_real_inference:
         from model import SimpleUNet3D
@@ -615,7 +569,6 @@ elif page == "Inference & Results":
         model.load_state_dict(state_dict)
         model.eval()
 
-        # Normalize volume for inference
         v_norm = volume.astype(np.float32)
         v_norm = (v_norm - v_norm.min()) / (v_norm.max() - v_norm.min() + 1e-8)
 
@@ -633,7 +586,6 @@ elif page == "Inference & Results":
 
     st.markdown("---")
 
-    # Prediction statistics
     st.markdown("### Prediction Statistics")
     stat_cols = st.columns(4)
     fg_voxels = int(pred_mask.sum())
@@ -666,8 +618,6 @@ elif page == "Inference & Results":
         )
 
     st.markdown("---")
-
-    # Interactive slice comparison
     st.markdown("### Slice Comparison")
 
     from utils import create_overlay
@@ -688,7 +638,6 @@ elif page == "Inference & Results":
 
     slice_idx = st.slider("Slice Index", 0, max_idx, default_idx, key="results_slice")
 
-    # Extract slices based on plane
     if plane == "XY (Axial)":
         ct_slice = volume[slice_idx, :, :]
         gt_slice = gt_mask[slice_idx, :, :]
@@ -707,7 +656,6 @@ elif page == "Inference & Results":
 
     overlay = create_overlay(ct_slice, gt_slice, pred_m_slice)
 
-    # Side-by-side display
     fig_cols = st.columns(4)
 
     with fig_cols[0]:
@@ -753,7 +701,6 @@ elif page == "Inference & Results":
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
 
-    # Legend
     st.markdown(
         "<div style='text-align:center;color:#888;font-size:0.9rem'>"
         "<span style='color:#00D4FF'>■</span> Ground Truth (Cyan) &nbsp;&nbsp; "
@@ -762,7 +709,6 @@ elif page == "Inference & Results":
         unsafe_allow_html=True,
     )
 
-    # Probability histogram
     with st.expander("Prediction Probability Distribution"):
         from utils import create_probability_histogram
         fig = create_probability_histogram(pred_prob)
@@ -787,6 +733,40 @@ elif page == "Metrics & Analysis":
     # Compute metrics
     metrics = compute_metrics(gt_mask, pred_mask)
 
+    # Log session to MongoDB
+    try:
+        log_session(
+            data_source=st.session_state.get("data_source", "synthetic"),
+            metrics=metrics,
+            pred_stats={
+                "foreground_voxels": int(pred_mask.sum()),
+                "coverage_pct": float(pred_mask.sum() / pred_mask.size * 100),
+                "mean_prob": float(pred_prob.mean()),
+                "max_prob": float(pred_prob.max())
+            }
+        )
+        st.toast("✅ Session logged to MongoDB")
+    except Exception as e:
+        st.warning(f"MongoDB log error: {e}")
+
+    # Show aggregated MongoDB stats
+    st.markdown("### 📊 Session History (MongoDB)")
+    try:
+        agg_stats = get_aggregated_stats()
+        if agg_stats:
+            import pandas as pd
+            st.dataframe(pd.DataFrame(agg_stats).rename(columns={
+                "_id": "Data Source",
+                "avg_dice": "Avg Dice",
+                "avg_iou": "Avg IoU",
+                "total_sessions": "Total Sessions"
+            }))
+        else:
+            st.caption("No sessions logged yet.")
+    except Exception as e:
+        st.warning(f"MongoDB read error: {e}")
+    st.markdown("---")
+
     st.markdown("### Segmentation Metrics")
 
     m_cols = st.columns(4)
@@ -799,7 +779,6 @@ elif page == "Metrics & Analysis":
 
     for col, (name, value, desc) in zip(m_cols, primary_metrics):
         with col:
-            # Color-code: green if > 0.5, yellow if > 0.3, red otherwise
             if value > 0.5:
                 color = "#4CAF50"
             elif value > 0.3:
@@ -816,7 +795,6 @@ elif page == "Metrics & Analysis":
 
     st.markdown("---")
 
-    # Detailed metrics
     with st.expander("Detailed Metrics"):
         detail_cols = st.columns(3)
         with detail_cols[0]:
@@ -836,7 +814,6 @@ elif page == "Metrics & Analysis":
 
     st.markdown("---")
 
-    # Probability histogram
     st.markdown("### Prediction Confidence Distribution")
     fig = create_probability_histogram(pred_prob, figsize=(10, 4))
     st.pyplot(fig, use_container_width=True)
@@ -844,7 +821,6 @@ elif page == "Metrics & Analysis":
 
     st.markdown("---")
 
-    # 3D surface visualization
     st.markdown("### 3D Surface Visualization")
 
     viz_choice = st.radio(
@@ -870,7 +846,6 @@ elif page == "Metrics & Analysis":
         fig_3d = create_3d_surface_plot(pred_mask, downsample=2, title="Predicted Surface")
         st.plotly_chart(fig_3d, use_container_width=True)
 
-    # Comparison slice view
     with st.expander("Error Analysis — Per-Slice Comparison"):
         st.markdown("View where the model succeeds and fails across slices.")
         D = gt_mask.shape[0]
@@ -879,15 +854,14 @@ elif page == "Metrics & Analysis":
         gt_s = gt_mask[err_idx]
         pred_s = pred_mask[err_idx]
 
-        # Create error map: TP=green, FP=red, FN=blue
         error_map = np.zeros((*gt_s.shape, 3), dtype=np.float32)
         tp = (gt_s > 0.5) & (pred_s > 0.5)
         fp = (gt_s < 0.5) & (pred_s > 0.5)
         fn = (gt_s > 0.5) & (pred_s < 0.5)
 
-        error_map[tp] = [0.3, 0.9, 0.3]   # Green: correct
-        error_map[fp] = [0.9, 0.2, 0.2]   # Red: false positive
-        error_map[fn] = [0.2, 0.4, 0.9]   # Blue: false negative
+        error_map[tp] = [0.3, 0.9, 0.3]
+        error_map[fp] = [0.9, 0.2, 0.2]
+        error_map[fn] = [0.2, 0.4, 0.9]
 
         err_cols = st.columns(3)
         with err_cols[0]:
@@ -936,7 +910,7 @@ st.markdown(
     '<div class="footer">'
     "Built for the <b>Vesuvius Challenge</b> — Surface Detection Task<br>"
     "Course project demo | 3D UNet Segmentation on CT Scan Volumes<br>"
-    '<span style="color:#D4A843">Powered by Streamlit & PyTorch</span>'
+    '<span style="color:#D4A843">Powered by Streamlit, PyTorch & MongoDB</span>'
     "</div>",
     unsafe_allow_html=True,
 )
